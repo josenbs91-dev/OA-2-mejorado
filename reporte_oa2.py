@@ -1,83 +1,77 @@
 import pandas as pd
 from io import BytesIO
-from openpyxl.worksheet.table import Table, TableStyleInfo
 
-def procesar_oa2(file_antes, file_nuevo):
+def procesar_oa2(file_pasado, file_actual):
     """
-    Procesa los archivos ANTES y MES NUEVO y genera un reporte OA-2.
-    Devuelve un BytesIO con el Excel listo para descargar y un diccionario con las comparaciones.
+    Procesa dos archivos Excel (pasado y actual) según el enfoque metodológico de análisis de expedientes.
+    Devuelve un BytesIO con el Excel listo para descargar y un diccionario con las comparaciones por prefijo.
     """
     try:
         # Leer archivos Excel
-        tabla_antes = pd.read_excel(file_antes, dtype=str)
-        tabla_nuevo = pd.read_excel(file_nuevo, dtype=str)
+        df_pasado = pd.read_excel(file_pasado, dtype=str)
+        df_actual = pd.read_excel(file_actual, dtype=str)
 
-        # Convertir montos a numérico
-        tabla_antes["MONTO"] = pd.to_numeric(tabla_antes.get("MONTO", 0), errors="coerce").fillna(0)
-        tabla_nuevo["MONTO"] = pd.to_numeric(tabla_nuevo.get("MONTO", 0), errors="coerce").fillna(0)
+        # Asegurar que MONTO es numérico
+        df_pasado["MONTO"] = pd.to_numeric(df_pasado.get("MONTO", 0), errors="coerce").fillna(0)
+        df_actual["MONTO"] = pd.to_numeric(df_actual.get("MONTO", 0), errors="coerce").fillna(0)
 
-        # Crear datounico y cuenta
-        tabla_antes["datounico"] = (
-            tabla_antes["EXPEDIENTE / CASO"].astype(str) + "-" +
-            tabla_antes["NUM_DOC_DEMANDANTE"].astype(str) + "-" +
-            tabla_antes["DEMANDANTE_NOMBRE"].astype(str)
-        )
-        tabla_antes["cuenta"] = tabla_antes["MAYOR"].astype(str) + "-" + tabla_antes["SUB_CTA"].astype(str)
+        # Crear columnas datounico y cuenta
+        def crear_tabla(df):
+            df["datounico"] = (
+                df["EXPEDIENTE / CASO"].astype(str) + "-" +
+                df["NUM_DOC_DEMANDANTE"].astype(str) + "-" +
+                df["DEMANDANTE_NOMBRE"].astype(str)
+            )
+            df["cuenta"] = df["MAYOR"].astype(str) + "-" + df["SUB_CTA"].astype(str)
+            df_agrupado = df.groupby(["datounico", "cuenta"], as_index=False)["MONTO"].sum()
+            return df_agrupado
 
-        tabla_nuevo["datounico"] = (
-            tabla_nuevo["EXPEDIENTE / CASO"].astype(str) + "-" +
-            tabla_nuevo["NUM_DOC_DEMANDANTE"].astype(str) + "-" +
-            tabla_nuevo["DEMANDANTE_NOMBRE"].astype(str)
-        )
-        tabla_nuevo["cuenta"] = tabla_nuevo["MAYOR"].astype(str) + "-" + tabla_nuevo["SUB_CTA"].astype(str)
+        df_pasado = crear_tabla(df_pasado)
+        df_actual = crear_tabla(df_actual)
 
-        # Función para comparar cuentas según prefijo
-        def comparar(tabla_antes, tabla_nuevo, prefijo):
+        # Comparación por prefijo de cuenta
+        def comparar_por_prefijo(df_pasado, df_actual, prefijo):
             resultados = []
-            antes_pref = tabla_antes[tabla_antes["cuenta"].str.startswith(prefijo)]
-            nuevo_pref = tabla_nuevo[tabla_nuevo["cuenta"].str.startswith(prefijo)]
-            
-            for _, row in antes_pref.iterrows():
+            pasado_pref = df_pasado[df_pasado["cuenta"].str.startswith(prefijo)]
+            actual_pref = df_actual[df_actual["cuenta"].str.startswith(prefijo)]
+
+            for _, row in pasado_pref.iterrows():
                 datounico = row["datounico"]
-                cuenta_antes = row["cuenta"]
-                monto_antes = row["MONTO"]
-                match = nuevo_pref[nuevo_pref["datounico"] == datounico]
+                cuenta_pasado = row["cuenta"]
+                monto_pasado = row["MONTO"]
+
+                match = actual_pref[actual_pref["datounico"] == datounico]
 
                 if not match.empty:
-                    cuentas_nuevas = match["cuenta"].unique()
-                    if cuenta_antes in cuentas_nuevas:
-                        monto_nuevo = match.loc[match["cuenta"] == cuenta_antes, "MONTO"].sum()
-                        diferencia = monto_nuevo - monto_antes
-                        resultados.append([datounico, cuenta_antes, cuenta_antes, monto_antes, monto_nuevo, diferencia, "Misma cuenta"])
+                    cuentas_actuales = match["cuenta"].unique()
+                    if cuenta_pasado in cuentas_actuales:
+                        monto_actual = match.loc[match["cuenta"] == cuenta_pasado, "MONTO"].sum()
+                        diferencia = monto_actual - monto_pasado
+                        resultados.append([datounico, cuenta_pasado, cuenta_pasado, monto_pasado, monto_actual, diferencia, "Misma cuenta"])
                     else:
                         monto_total = match["MONTO"].sum()
-                        resultados.append([datounico, cuenta_antes, ", ".join(cuentas_nuevas), monto_antes, monto_total, None, "Cuenta diferente"])
+                        resultados.append([datounico, cuenta_pasado, ", ".join(cuentas_actuales), monto_pasado, monto_total, None, "Cuenta diferente"])
                 else:
-                    resultados.append([datounico, cuenta_antes, "-", monto_antes, 0, -monto_antes, "Solo en ANTES"])
+                    resultados.append([datounico, cuenta_pasado, "-", monto_pasado, 0, -monto_pasado, "Solo en pasado"])
 
-            for _, row in nuevo_pref.iterrows():
+            for _, row in actual_pref.iterrows():
                 datounico = row["datounico"]
-                cuenta_nueva = row["cuenta"]
-                monto_nuevo = row["MONTO"]
-                if datounico not in antes_pref["datounico"].values:
-                    resultados.append([datounico, "-", cuenta_nueva, 0, monto_nuevo, monto_nuevo, "Solo en MES NUEVO"])
+                cuenta_actual = row["cuenta"]
+                monto_actual = row["MONTO"]
+                if datounico not in pasado_pref["datounico"].values:
+                    resultados.append([datounico, "-", cuenta_actual, 0, monto_actual, monto_actual, "Solo en actual"])
 
-            df_comp = pd.DataFrame(resultados, columns=["datounico", "Cuenta_ANTES", "Cuenta_MES_NUEVO", "MONTO_ANTES", "MONTO_MES_NUEVO", "Diferencia", "Resultado"])
-            return df_comp
+            return pd.DataFrame(resultados, columns=["datounico", "Cuenta_Pasado", "Cuenta_Actual",
+                                                     "MONTO_PASADO", "MONTO_ACTUAL", "Diferencia", "Resultado"])
 
-        # Comparaciones por prefijo
-        comparaciones = {
-            "Comparación 1202": comparar(tabla_antes, tabla_nuevo, "1202"),
-            "Comparación 9110": comparar(tabla_antes, tabla_nuevo, "9110"),
-            "Comparación 2401": comparar(tabla_antes, tabla_nuevo, "2401"),
-            "Comparación 2103": comparar(tabla_antes, tabla_nuevo, "2103")
-        }
+        prefijos = ["1202", "9110", "2401", "2103"]
+        comparaciones = {f"Comparación {p}": comparar_por_prefijo(df_pasado, df_actual, p) for p in prefijos}
 
         # Exportar a Excel en memoria
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            tabla_antes.to_excel(writer, index=False, sheet_name="ANTES")
-            tabla_nuevo.to_excel(writer, index=False, sheet_name="MES NUEVO")
+            df_pasado.to_excel(writer, index=False, sheet_name="PASADO")
+            df_actual.to_excel(writer, index=False, sheet_name="ACTUAL")
             for nombre, df_comp in comparaciones.items():
                 df_comp.to_excel(writer, index=False, sheet_name=nombre)
         output.seek(0)
